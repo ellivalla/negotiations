@@ -1,0 +1,973 @@
+import React, { useState, useEffect } from 'react';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+
+const WinAsMuchAsYouCanGame = () => {
+  const [currentView, setCurrentView] = useState('landing'); // 'landing', 'lobby', 'room', 'game', 'gameOver'
+  const [selectedRoom, setSelectedRoom] = useState(null);
+  const [playerName, setPlayerName] = useState('');
+  const [playerId, setPlayerId] = useState(null);
+  const [userEmail, setUserEmail] = useState('');
+  
+  // Game state
+  const [currentRound, setCurrentRound] = useState(1);
+  const [gameStarted, setGameStarted] = useState(false);
+  const [gameEnded, setGameEnded] = useState(false);
+  const [myChoice, setMyChoice] = useState(null);
+  const [scores, setScores] = useState({});
+  const [roundHistory, setRoundHistory] = useState([]);
+  const [currentPhase, setCurrentPhase] = useState('playing'); // 'playing', 'waiting', 'reveal', 'bonus-discussion'
+  const [discussionTimer, setDiscussionTimer] = useState(0);
+  const [roundResults, setRoundResults] = useState(null);
+  
+  // Room state
+  const [rooms, setRooms] = useState(() => {
+    const initialRooms = {};
+    for (let i = 1; i <= 10; i++) {
+      initialRooms[i] = {
+        id: i,
+        players: {},
+        gameInProgress: false,
+        maxPlayers: 4,
+        computerStates: {} // Track computer AI states
+      };
+    }
+    return initialRooms;
+  });
+
+  const bonusRounds = [5, 8, 10];
+  const bonusMultipliers = { 5: 3, 8: 5, 10: 10 };
+
+  const handleEmailSubmit = (email) => {
+    if (!email || !email.includes('@')) {
+      alert('Please enter a valid email address');
+      return;
+    }
+    
+    setUserEmail(email);
+    setCurrentView('lobby');
+    
+    // Here you could send the email to your backend/analytics
+    console.log('User email collected:', email);
+  };
+
+  // Computer AI strategies based on player position
+  const getComputerChoice = (playerId, computerState, history) => {
+    const player1Id = Object.keys(rooms[selectedRoom]?.players || {}).find(pid => 
+      rooms[selectedRoom].players[pid].name === playerName
+    );
+    
+    // Get player 1's choice history
+    const player1History = history.map(round => round.choices[player1Id]).filter(choice => choice);
+    const lastPlayer1Choice = player1History[player1History.length - 1];
+    
+    // 4th player - Tit for Tat
+    if (playerId.endsWith('_2')) { // 4th computer player (3rd computer added)
+      if (history.length === 0) return 'Y'; // Start cooperative
+      return lastPlayer1Choice || 'Y'; // Mirror player 1's last choice
+    }
+    
+    // 3rd player - Slow to Anger  
+    if (playerId.endsWith('_1')) { // 3rd computer player (2nd computer added)
+      if (history.length === 0) return 'Y'; // Start cooperative
+      
+      // Check for two successive competitive moves from player 1
+      if (player1History.length >= 2) {
+        const lastTwo = player1History.slice(-2);
+        if (lastTwo[0] === 'X' && lastTwo[1] === 'X') {
+          computerState.slowToAngerTriggered = true;
+        }
+      }
+      
+      // Revert when player 1 cooperates
+      if (lastPlayer1Choice === 'Y') {
+        computerState.slowToAngerTriggered = false;
+      }
+      
+      return computerState.slowToAngerTriggered ? 'X' : 'Y';
+    }
+    
+    // 2nd player - Grudge
+    if (playerId.endsWith('_0')) { // 2nd computer player (1st computer added)
+      if (history.length === 0) return 'Y'; // Start cooperative
+      
+      // Once player 1 competes, hold grudge
+      if (lastPlayer1Choice === 'X') {
+        computerState.grudgeTriggered = true;
+        computerState.grudgeCount = 2; // Play competitive at least twice
+      }
+      
+      if (computerState.grudgeTriggered) {
+        // Check for two successive cooperative moves to forgive
+        if (player1History.length >= 2) {
+          const lastTwo = player1History.slice(-2);
+          if (lastTwo[0] === 'Y' && lastTwo[1] === 'Y') {
+            computerState.grudgeTriggered = false;
+            computerState.grudgeCount = 0;
+            return 'Y';
+          }
+        }
+        
+        // Play competitive moves while grudge is active
+        if (computerState.grudgeCount > 0) {
+          computerState.grudgeCount--;
+          return 'X';
+        }
+        
+        // Continue being competitive until forgiveness condition is met
+        return 'X';
+      }
+      
+      return 'Y'; // Default cooperative
+    }
+    
+    return 'Y'; // Fallback
+  };
+
+  const calculatePoints = (choices) => {
+    const xCount = Object.values(choices).filter(choice => choice === 'X').length;
+    
+    let pointsPerX = 0;
+    let pointsPerY = 0;
+    
+    if (xCount === 4) pointsPerX = -1, pointsPerY = 0;
+    else if (xCount === 3) pointsPerX = 3, pointsPerY = -1;
+    else if (xCount === 2) pointsPerX = 2, pointsPerY = -2;
+    else if (xCount === 1) pointsPerX = 1, pointsPerY = -3;
+    else if (xCount === 0) pointsPerX = 0, pointsPerY = 1;
+    
+    return { pointsPerX, pointsPerY };
+  };
+
+  const joinRoom = (roomId, name) => {
+    if (!name.trim()) {
+      alert('Please enter your name');
+      return;
+    }
+    
+    const room = rooms[roomId];
+    if (Object.keys(room.players).length >= room.maxPlayers) {
+      alert('Room is full');
+      return;
+    }
+    
+    const newPlayerId = `player_${Date.now()}`;
+    setPlayerId(newPlayerId);
+    setPlayerName(name);
+    setSelectedRoom(roomId);
+    
+    setRooms(prev => ({
+      ...prev,
+      [roomId]: {
+        ...prev[roomId],
+        players: {
+          ...prev[roomId].players,
+          [newPlayerId]: { name, isHuman: true, choice: null }
+        }
+      }
+    }));
+    
+    setCurrentView('room');
+  };
+
+  const leaveRoom = () => {
+    if (selectedRoom && playerId) {
+      setRooms(prev => {
+        const newPlayers = { ...prev[selectedRoom].players };
+        delete newPlayers[playerId];
+        return {
+          ...prev,
+          [selectedRoom]: {
+            ...prev[selectedRoom],
+            players: newPlayers,
+            gameInProgress: false
+          }
+        };
+      });
+    }
+    
+    setSelectedRoom(null);
+    setPlayerId(null);
+    setPlayerName('');
+    setCurrentView('lobby');
+    resetGameState();
+  };
+
+  const resetGameState = () => {
+    setCurrentRound(1);
+    setGameStarted(false);
+    setGameEnded(false);
+    setMyChoice(null);
+    setScores({});
+    setRoundHistory([]);
+    setCurrentPhase('playing');
+    setDiscussionTimer(0);
+    setRoundResults(null);
+  };
+
+  const addComputerPlayers = () => {
+    const room = rooms[selectedRoom];
+    const currentPlayerCount = Object.keys(room.players).length;
+    const computersNeeded = 4 - currentPlayerCount;
+    
+    if (computersNeeded <= 0) return;
+    
+    const newPlayers = { ...room.players };
+    const newComputerStates = { ...room.computerStates };
+    
+    // Start with existing scores and ensure all existing players have scores
+    const newScores = {};
+    
+    // First, make sure all existing players (including human) have scores
+    Object.keys(room.players).forEach(pid => {
+      newScores[pid] = scores[pid] || 0;
+    });
+    
+    // Then add computers and their scores
+    for (let i = 0; i < computersNeeded; i++) {
+      const computerId = `computer_${Date.now()}_${i}`;
+      newPlayers[computerId] = {
+        name: `Computer ${i + 1}`,
+        isHuman: false,
+        choice: null
+      };
+      
+      // Initialize computer state for tracking behavior
+      newComputerStates[computerId] = {
+        grudgeTriggered: false,
+        grudgeCount: 0,
+        slowToAngerTriggered: false
+      };
+      
+      // Initialize computer score
+      newScores[computerId] = 0;
+    }
+    
+    // Update both room and scores in one go
+    setRooms(prev => ({
+      ...prev,
+      [selectedRoom]: {
+        ...prev[selectedRoom],
+        players: newPlayers,
+        computerStates: newComputerStates
+      }
+    }));
+    
+    // Force update scores with all players
+    setScores(newScores);
+  };
+
+  const launchGame = () => {
+    const room = rooms[selectedRoom];
+    const playerCount = Object.keys(room.players).length;
+    
+    if (playerCount < 1) {
+      alert('Need at least 1 player to start');
+      return;
+    }
+    
+    // Add computer players if needed
+    if (playerCount < 4) {
+      addComputerPlayers();
+    } else {
+      // Initialize scores for existing players only
+      const initialScores = {};
+      Object.keys(room.players).forEach(pid => {
+        initialScores[pid] = 0;
+      });
+      setScores(initialScores);
+    }
+    
+    setRooms(prev => ({
+      ...prev,
+      [selectedRoom]: {
+        ...prev[selectedRoom],
+        gameInProgress: true
+      }
+    }));
+    
+    setGameStarted(true);
+    setCurrentView('game');
+    setCurrentPhase('playing');
+  };
+
+  const makeChoice = (choice) => {
+    setMyChoice(choice);
+    
+    // Update room with player choice
+    setRooms(prev => ({
+      ...prev,
+      [selectedRoom]: {
+        ...prev[selectedRoom],
+        players: {
+          ...prev[selectedRoom].players,
+          [playerId]: {
+            ...prev[selectedRoom].players[playerId],
+            choice
+          }
+        }
+      }
+    }));
+    
+    setCurrentPhase('waiting');
+  };
+
+  const generateComputerChoices = () => {
+    const room = rooms[selectedRoom];
+    const updatedPlayers = { ...room.players };
+    const updatedComputerStates = { ...room.computerStates };
+    
+    Object.keys(updatedPlayers).forEach(pid => {
+      const player = updatedPlayers[pid];
+      if (!player.isHuman && !player.choice) {
+        const choice = getComputerChoice(pid, updatedComputerStates[pid] || {}, roundHistory);
+        updatedPlayers[pid].choice = choice;
+      }
+    });
+    
+    setRooms(prev => ({
+      ...prev,
+      [selectedRoom]: {
+        ...prev[selectedRoom],
+        players: updatedPlayers,
+        computerStates: updatedComputerStates
+      }
+    }));
+  };
+
+  const processRound = () => {
+    const room = rooms[selectedRoom];
+    const choices = {};
+    
+    Object.keys(room.players).forEach(pid => {
+      choices[pid] = room.players[pid].choice;
+    });
+    
+    const { pointsPerX, pointsPerY } = calculatePoints(choices);
+    const multiplier = bonusRounds.includes(currentRound) ? bonusMultipliers[currentRound] : 1;
+    
+    const newScores = { ...scores };
+    Object.keys(choices).forEach(pid => {
+      const choice = choices[pid];
+      const points = choice === 'X' ? pointsPerX : pointsPerY;
+      newScores[pid] += points * multiplier;
+    });
+    
+    setScores(newScores);
+    
+    const roundResult = {
+      round: currentRound,
+      choices,
+      pointsPerX,
+      pointsPerY,
+      multiplier,
+      scores: { ...newScores },
+      myChoice: myChoice,
+      myPoints: (myChoice === 'X' ? pointsPerX : pointsPerY) * multiplier,
+      allPlayerPoints: Object.keys(choices).reduce((acc, pid) => {
+        const choice = choices[pid];
+        const points = choice === 'X' ? pointsPerX : pointsPerY;
+        acc[pid] = points * multiplier;
+        return acc;
+      }, {})
+    };
+    
+    setRoundHistory(prev => [...prev, roundResult]);
+    setRoundResults(roundResult);
+    setCurrentPhase('reveal');
+  };
+
+  const nextRound = () => {
+    if (currentRound >= 10) {
+      setGameEnded(true);
+      setCurrentView('gameOver');
+      return;
+    }
+    
+    const nextRoundNum = currentRound + 1;
+    
+    // Reset choices
+    setMyChoice(null);
+    const room = rooms[selectedRoom];
+    const resetPlayers = { ...room.players };
+    Object.keys(resetPlayers).forEach(pid => {
+      resetPlayers[pid].choice = null;
+    });
+    
+    setRooms(prev => ({
+      ...prev,
+      [selectedRoom]: {
+        ...prev[selectedRoom],
+        players: resetPlayers
+      }
+    }));
+    
+    if (bonusRounds.includes(nextRoundNum)) {
+      setCurrentPhase('bonus-discussion');
+      setDiscussionTimer(60);
+    } else {
+      setCurrentPhase('playing');
+    }
+    
+    setCurrentRound(nextRoundNum);
+    setRoundResults(null);
+  };
+
+  const endDiscussion = () => {
+    setCurrentPhase('playing');
+    setDiscussionTimer(0);
+  };
+
+  // Auto-process round when all choices are made
+  useEffect(() => {
+    if (currentPhase === 'waiting' && selectedRoom) {
+      const room = rooms[selectedRoom];
+      const allChoicesMade = Object.keys(room.players).every(pid => room.players[pid].choice !== null);
+      
+      if (allChoicesMade) {
+        setTimeout(() => processRound(), 1000); // Small delay for dramatic effect
+      } else {
+        // Generate computer choices if needed
+        const needsComputerChoices = Object.keys(room.players).some(pid => 
+          !room.players[pid].isHuman && !room.players[pid].choice
+        );
+        if (needsComputerChoices) {
+          setTimeout(() => generateComputerChoices(), 500);
+        }
+      }
+    }
+  }, [currentPhase, rooms, selectedRoom]);
+
+  // Discussion timer
+  useEffect(() => {
+    let timer;
+    if (discussionTimer > 0) {
+      timer = setTimeout(() => setDiscussionTimer(discussionTimer - 1), 1000);
+    } else if (currentPhase === 'bonus-discussion' && discussionTimer === 0) {
+      setCurrentPhase('playing');
+    }
+    return () => clearTimeout(timer);
+  }, [discussionTimer, currentPhase]);
+
+  // Landing page view
+  if (currentView === 'landing') {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-red-50 flex items-center justify-center p-6" style={{fontFamily: 'Montserrat, sans-serif'}}>
+        <div className="max-w-2xl w-full text-center space-y-8">
+          {/* Main Title */}
+          <div className="space-y-4">
+            <h1 className="text-5xl md:text-6xl font-bold text-gray-800 leading-tight">
+              "Win as Much as<br />
+              <span className="text-red-600">You Can</span>"
+            </h1>
+            <h2 className="text-xl md:text-2xl text-gray-600 font-medium">
+              Negotiation & Game Theory Made Interactive
+            </h2>
+          </div>
+
+          {/* Email Collection Form */}
+          <div className="bg-white p-8 rounded-2xl shadow-xl border border-gray-200 max-w-md mx-auto mt-12">
+            <h3 className="text-lg font-bold text-gray-800 mb-4">Ready to Play?</h3>
+            <p className="text-sm text-gray-600 mb-6">Enter your email to start your negotiation journey</p>
+            
+            <form onSubmit={(e) => {
+              e.preventDefault();
+              const email = e.target.email.value;
+              handleEmailSubmit(email);
+            }} className="space-y-4">
+              <input
+                type="email"
+                name="email"
+                placeholder="your.email@example.com"
+                required
+                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
+              />
+              <button
+                type="submit"
+                className="w-full py-3 bg-gradient-to-r from-blue-600 to-red-600 text-white font-bold rounded-lg hover:from-blue-700 hover:to-red-700 transition-all transform hover:scale-105 shadow-lg"
+              >
+                Start Playing →
+              </button>
+            </form>
+            
+            <p className="text-xs text-gray-500 mt-4">
+              We respect your privacy. No spam, just occasional updates about negotiation insights.
+            </p>
+          </div>
+
+          {/* Powered by */}
+          <div className="text-center">
+            <p className="text-sm text-gray-500 mb-2">Powered by</p>
+            <a 
+              href="https://www.transformal.ai" 
+              target="_blank" 
+              rel="noopener noreferrer"
+              className="text-2xl font-bold text-gray-800 hover:text-blue-600 transition-colors"
+            >
+              Transformal
+            </a>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Lobby view
+  if (currentView === 'lobby') {
+    return (
+      <div className="max-w-6xl mx-auto p-6 space-y-6" style={{fontFamily: 'Montserrat, sans-serif'}}>
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-3xl text-center text-red-600">WIN AS MUCH AS YOU CAN</CardTitle>
+            <p className="text-center text-gray-600">Select a room to join or create a game</p>
+          </CardHeader>
+          <CardContent>
+            <div className="grid md:grid-cols-2 lg:grid-cols-5 gap-4">
+              {Object.values(rooms).map(room => (
+                <Card key={room.id} className={`cursor-pointer hover:shadow-lg transition-shadow ${room.gameInProgress ? 'opacity-50' : ''}`}>
+                  <CardContent className="p-4">
+                    <h3 className="font-bold text-lg mb-2">Room {room.id}</h3>
+                    <p className="text-sm text-gray-600 mb-3">
+                      Players: {Object.keys(room.players).length}/{room.maxPlayers}
+                    </p>
+                    {room.gameInProgress && (
+                      <p className="text-xs text-red-500 mb-2">Game in progress</p>
+                    )}
+                    <div className="space-y-2">
+                      {Object.values(room.players).slice(0, 3).map((player, idx) => (
+                        <p key={idx} className="text-xs truncate">
+                          {player.name} {!player.isHuman && '🤖'}
+                        </p>
+                      ))}
+                      {Object.keys(room.players).length > 3 && (
+                        <p className="text-xs text-gray-500">+{Object.keys(room.players).length - 3} more</p>
+                      )}
+                    </div>
+                    {!room.gameInProgress && (
+                      <div className="mt-3">
+                        <input
+                          type="text"
+                          placeholder="Enter your name"
+                          className="w-full px-2 py-1 text-xs border rounded mb-2"
+                          id={`name-input-${room.id}`}
+                          onKeyPress={(e) => {
+                            if (e.key === 'Enter') {
+                              joinRoom(room.id, e.target.value);
+                            }
+                          }}
+                        />
+                        <button
+                          onClick={() => {
+                            const input = document.getElementById(`name-input-${room.id}`);
+                            const name = input?.value || '';
+                            joinRoom(room.id, name);
+                          }}
+                          className="w-full py-1 bg-blue-600 text-white text-xs rounded hover:bg-blue-700 transition-colors"
+                        >
+                          Join Room
+                        </button>
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+        
+        <Card>
+          <CardHeader>
+            <CardTitle>How to Play</CardTitle>
+          </CardHeader>
+          <CardContent className="grid md:grid-cols-2 gap-6">
+            <div>
+              <h3 className="font-bold mb-2">Rules:</h3>
+              <ul className="text-sm space-y-1">
+                <li>• Choose X or Y each round</li>
+                <li>• 10 rounds total</li>
+                <li>• Bonus rounds: 5 (×3), 8 (×5), 10 (×10)</li>
+                <li>• Discussion only before bonus rounds</li>
+                <li>• Goal: Win as much as you can!</li>
+              </ul>
+              <div className="mt-3 p-2 bg-gray-100 rounded text-xs">
+                <p className="font-bold mb-1">Legend:</p>
+                <p>• X = Compete</p>
+                <p>• Y = Cooperate</p>
+              </div>
+            </div>
+            <div>
+              <h3 className="font-bold mb-2">Scoring:</h3>
+              <div className="text-xs">
+                <div className="grid grid-cols-3 gap-1 font-bold">
+                  <span>Result</span><span>X Points</span><span>Y Points</span>
+                </div>
+                <div className="grid grid-cols-3 gap-1">
+                  <span>XXXX</span><span>-1</span><span>0</span>
+                  <span>XXXY</span><span>+3</span><span>-1</span>
+                  <span>XXYY</span><span>+2</span><span>-2</span>
+                  <span>XYYY</span><span>+1</span><span>-3</span>
+                  <span>YYYY</span><span>0</span><span>+1</span>
+                </div>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+        
+        <div className="text-center text-sm text-gray-500 mt-8">
+          Become a better negotiator with <a href="https://www.transformal.ai" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 underline">www.transformal.ai</a>
+        </div>
+      </div>
+    );
+  }
+
+  // Room waiting view
+  if (currentView === 'room') {
+    const room = rooms[selectedRoom];
+    const playerCount = Object.keys(room?.players || {}).length;
+    
+    return (
+      <div className="max-w-4xl mx-auto p-6 space-y-6" style={{fontFamily: 'Montserrat, sans-serif'}}>
+        <Card>
+          <CardHeader>
+            <CardTitle>Room {selectedRoom} - Waiting for Players</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-6">
+            <div className="flex justify-between items-center">
+              <h3 className="text-lg font-bold">Players ({playerCount}/4):</h3>
+              <button
+                onClick={leaveRoom}
+                className="px-4 py-2 bg-gray-500 text-white rounded hover:bg-gray-600 transition-colors"
+              >
+                Leave Room
+              </button>
+            </div>
+            
+            <div className="grid grid-cols-2 gap-4">
+              {Object.values(room?.players || {}).map((player, idx) => (
+                <div key={idx} className="p-3 bg-gray-50 rounded-lg flex items-center justify-between">
+                  <span className="font-medium">{player.name}</span>
+                  <span className="text-sm text-gray-500">
+                    {player.isHuman ? '👤 Human' : '🤖 Computer'}
+                  </span>
+                </div>
+              ))}
+              {Array.from({ length: 4 - playerCount }).map((_, idx) => (
+                <div key={`empty-${idx}`} className="p-3 border-2 border-dashed border-gray-300 rounded-lg text-center text-gray-500">
+                  Empty Slot
+                </div>
+              ))}
+            </div>
+            
+            <div className="text-center space-y-4">
+              <p className="text-gray-600">
+                {playerCount < 4 ? 
+                  'You can start with fewer players - computers will fill remaining spots.' :
+                  'All players ready! You can launch the game.'
+                }
+              </p>
+              
+              <button
+                onClick={launchGame}
+                disabled={playerCount < 1}
+                className="px-6 py-3 bg-green-600 text-white rounded-lg font-bold hover:bg-green-700 transition-colors disabled:bg-gray-400"
+              >
+                Launch Game
+              </button>
+            </div>
+          </CardContent>
+        </Card>
+        
+        <div className="text-center text-sm text-gray-500 mt-8">
+          Become a better negotiator with <a href="https://www.transformal.ai" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 underline">www.transformal.ai</a>
+        </div>
+      </div>
+    );
+  }
+
+  // Game view
+  if (currentView === 'game') {
+    const room = rooms[selectedRoom];
+    const getRoundTypeLabel = (round) => {
+      if (bonusRounds.includes(round)) {
+        return `BONUS ROUND (×${bonusMultipliers[round]})`;
+      }
+      return 'Regular Round';
+    };
+
+    return (
+      <div className="max-w-4xl mx-auto p-6 space-y-6" style={{fontFamily: 'Montserrat, sans-serif'}}>
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-2xl text-center">
+              Round {currentRound}/10 - {getRoundTypeLabel(currentRound)}
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            {/* How to Play Reminder */}
+            <div className="mb-6 p-4 bg-blue-50 border border-blue-200 rounded-lg">
+              <h4 className="font-bold text-sm mb-3">How to Play:</h4>
+              <div className="grid md:grid-cols-2 gap-6 text-xs">
+                <div>
+                  <h5 className="font-bold mb-2">Rules:</h5>
+                  <ul className="space-y-1">
+                    <li>• Choose X (Compete) or Y (Cooperate)</li>
+                    <li>• Bonus rounds: 5 (×3), 8 (×5), 10 (×10)</li>
+                    <li>• Goal: Win as much as you can!</li>
+                  </ul>
+                </div>
+                <div>
+                  <h5 className="font-bold mb-2">Scoring:</h5>
+                  <div className="overflow-hidden">
+                    <div className="grid grid-cols-3 gap-1 font-bold mb-1">
+                      <span>Result</span><span>X Points</span><span>Y Points</span>
+                    </div>
+                    <div className="space-y-0.5">
+                      <div className="grid grid-cols-3 gap-1"><span>XXXX</span><span>-1</span><span>0</span></div>
+                      <div className="grid grid-cols-3 gap-1"><span>XXXY</span><span>+3</span><span>-1</span></div>
+                      <div className="grid grid-cols-3 gap-1"><span>XXYY</span><span>+2</span><span>-2</span></div>
+                      <div className="grid grid-cols-3 gap-1"><span>XYYY</span><span>+1</span><span>-3</span></div>
+                      <div className="grid grid-cols-3 gap-1"><span>YYYY</span><span>0</span><span>+1</span></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            {currentPhase === 'bonus-discussion' && (
+              <div className="mb-6 p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
+                <h3 className="font-bold text-lg mb-2">Discussion Time!</h3>
+                <p className="mb-2">You may now discuss strategy before this bonus round.</p>
+                {discussionTimer > 0 ? (
+                  <p className="text-lg font-bold text-red-600">Time remaining: {discussionTimer}s</p>
+                ) : (
+                  <button
+                    onClick={endDiscussion}
+                    className="py-2 px-4 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
+                  >
+                    End Discussion & Continue
+                  </button>
+                )}
+              </div>
+            )}
+            
+            {currentPhase === 'playing' && !myChoice && (
+              <div className="space-y-6">
+                <div className="text-center">
+                  <h3 className="text-xl font-bold mb-4">Make Your Choice</h3>
+                  <p className="text-gray-600 mb-6">Choose X or Y for this round. Other players cannot see your choice.</p>
+                </div>
+                
+                <div className="flex gap-6 justify-center">
+                  <button
+                    onClick={() => makeChoice('X')}
+                    className="px-12 py-6 bg-blue-600 text-white text-2xl font-bold rounded-lg hover:bg-blue-700 transition-colors shadow-lg"
+                  >
+                    Choose X
+                  </button>
+                  <button
+                    onClick={() => makeChoice('Y')}
+                    className="px-12 py-6 bg-red-600 text-white text-2xl font-bold rounded-lg hover:bg-red-700 transition-colors shadow-lg"
+                  >
+                    Choose Y
+                  </button>
+                </div>
+              </div>
+            )}
+            
+            {(currentPhase === 'playing' || currentPhase === 'waiting') && myChoice && (
+              <div className="text-center space-y-4">
+                <h3 className="text-xl font-bold">Your Choice: {myChoice}</h3>
+                <p className="text-gray-600">Waiting for other players to make their choices...</p>
+                <div className="animate-pulse text-blue-600">⏳ Please wait</div>
+              </div>
+            )}
+            
+            {currentPhase === 'reveal' && roundResults && (
+              <div className="space-y-6">
+                <div className="text-center">
+                  <h3 className="text-xl font-bold mb-4">Round {currentRound} Results</h3>
+                  
+                  <div className="p-4 bg-blue-50 border-2 border-blue-200 rounded-lg mb-4">
+                    <p className="text-lg mb-2">Your choice: <span className={`font-bold text-2xl ${myChoice === 'X' ? 'text-blue-600' : 'text-red-600'}`}>{myChoice}</span></p>
+                    <p className="text-lg">Your points this round: <span className={`font-bold text-xl ${roundResults.myPoints >= 0 ? 'text-green-600' : 'text-red-600'}`}>{roundResults.myPoints > 0 ? '+' : ''}{roundResults.myPoints}</span></p>
+                  </div>
+                  
+                  <div className="mb-4">
+                    <h4 className="font-bold mb-2">All Players This Round:</h4>
+                    <div className="grid grid-cols-2 gap-2">
+                      {Object.entries(roundResults.choices).map(([pid, choice]) => {
+                        // Calculate points for this player this round
+                        const points = choice === 'X' ? roundResults.pointsPerX : roundResults.pointsPerY;
+                        const totalPoints = points * roundResults.multiplier;
+                        
+                        return (
+                          <div key={pid} className={`p-2 rounded border text-sm ${pid === playerId ? 'bg-blue-50 border-blue-200' : 'bg-gray-50'}`}>
+                            <div className="flex justify-between items-center">
+                              <span className="truncate max-w-20">{room.players[pid]?.name}{pid === playerId && ' (You)'}</span>
+                              <div className="text-right">
+                                <span className={`font-bold ${choice === 'X' ? 'text-blue-600' : 'text-red-600'}`}>{choice}</span>
+                                <span className={`ml-2 font-bold ${totalPoints >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                                  {totalPoints > 0 ? '+' : ''}{totalPoints}
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  
+                  <div className="mb-4">
+                    <p className="text-sm text-gray-600 mb-2">Final combination this round:</p>
+                    <div className="flex justify-center gap-4">
+                      {Object.entries(roundResults.choices).map(([pid, choice]) => (
+                        <div key={pid} className="text-center">
+                          <p className="text-xs text-gray-500 truncate max-w-20">{room.players[pid]?.name}</p>
+                          <p className={`text-xl font-bold ${choice === 'X' ? 'text-blue-600' : 'text-red-600'}`}>
+                            {choice}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  
+                  <p className="text-sm text-gray-600">
+                    Points this round: X = {roundResults.pointsPerX}, Y = {roundResults.pointsPerY}
+                    {bonusRounds.includes(currentRound) && (
+                      <span className="text-green-600 font-bold"> (×{bonusMultipliers[currentRound]})</span>
+                    )}
+                  </p>
+                </div>
+                
+                <button
+                  onClick={nextRound}
+                  className="w-full py-3 bg-blue-600 text-white rounded-lg font-bold hover:bg-blue-700 transition-colors"
+                >
+                  {currentRound >= 10 ? 'View Final Results' : 'Next Round'}
+                </button>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+        
+        <Card>
+          <CardHeader>
+            <CardTitle>Scoreboard</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-2">
+              {Object.entries(scores).sort((a, b) => b[1] - a[1]).map(([pid, score]) => (
+                <div key={pid} className={`flex justify-between items-center p-3 rounded-lg ${pid === playerId ? 'bg-blue-50 border-2 border-blue-200' : 'bg-gray-50'}`}>
+                  <span className="font-medium">
+                    {room?.players[pid]?.name} {pid === playerId && '(You)'} {!room?.players[pid]?.isHuman && '🤖'}
+                  </span>
+                  <span className="font-bold text-lg">{score}</span>
+                </div>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+        
+        <div className="text-center">
+          <button
+            onClick={leaveRoom}
+            className="px-4 py-2 bg-gray-500 text-white rounded hover:bg-gray-600 transition-colors"
+          >
+            Leave Game
+          </button>
+        </div>
+        
+        <div className="text-center text-sm text-gray-500 mt-8">
+          Become a better negotiator with <a href="https://www.transformal.ai" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 underline">www.transformal.ai</a>
+        </div>
+      </div>
+    );
+  }
+
+  // Game over view
+  if (currentView === 'gameOver') {
+    const sortedScores = Object.entries(scores).sort((a, b) => b[1] - a[1]);
+    const maxScore = Math.max(...Object.values(scores));
+    const totalPoints = Object.values(scores).reduce((sum, score) => sum + score, 0);
+    const myScore = scores[playerId];
+    const myRank = sortedScores.findIndex(([pid]) => pid === playerId) + 1;
+    const room = rooms[selectedRoom];
+
+    return (
+      <div className="max-w-4xl mx-auto p-6 space-y-6" style={{fontFamily: 'Montserrat, sans-serif'}}>
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-2xl text-center">Game Over!</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-6">
+            <div className="text-center p-6 bg-blue-50 rounded-lg">
+              <h2 className="text-2xl font-bold mb-2">Your Final Result</h2>
+              <p className="text-xl mb-2">Score: <span className="font-bold text-blue-600">{myScore}</span></p>
+              <p className="text-lg">Rank: <span className="font-bold">#{myRank}</span> out of 4</p>
+            </div>
+            
+            <div className="space-y-4">
+              <h3 className="text-lg font-bold">Final Leaderboard:</h3>
+              <div className="space-y-2">
+                {sortedScores.map(([pid, score], index) => (
+                  <div key={pid} className={`flex justify-between items-center p-4 rounded-lg ${
+                    pid === playerId ? 'bg-blue-50 border-2 border-blue-200' : 
+                    index === 0 ? 'bg-yellow-50 border-2 border-yellow-300' : 'bg-gray-50'
+                  }`}>
+                    <div className="flex items-center gap-3">
+                      <span className="font-bold text-lg">#{index + 1}</span>
+                      <span className="font-medium">
+                        {room?.players[pid]?.name}
+                        {pid === playerId && ' (You)'}
+                        {!room?.players[pid]?.isHuman && ' 🤖'}
+                      </span>
+                    </div>
+                    <span className={`font-bold text-xl ${score === maxScore ? 'text-yellow-600' : ''}`}>
+                      {score}
+                    </span>
+                  </div>
+                ))}
+              </div>
+              
+              <div className="mt-6 p-4 bg-gray-100 rounded-lg border-2 border-gray-300">
+                <div className="flex justify-between items-center">
+                  <span className="font-bold text-lg">Total Points (All Players):</span>
+                  <span className="font-bold text-xl text-gray-800">{totalPoints}</span>
+                </div>
+                <p className="text-sm text-gray-600 mt-1">
+                  {totalPoints > 0 ? 'Collective success! Everyone benefited.' : 
+                   totalPoints === 0 ? 'Perfectly balanced outcome.' : 
+                   'Competitive play led to collective loss.'}
+                </p>
+              </div>
+            </div>
+            
+            <div className="flex gap-4 justify-center">
+              <button
+                onClick={() => {
+                  resetGameState();
+                  setCurrentView('room');
+                }}
+                className="px-6 py-3 bg-blue-600 text-white rounded-lg font-bold hover:bg-blue-700 transition-colors"
+              >
+                Play Again
+              </button>
+              <button
+                onClick={leaveRoom}
+                className="px-6 py-3 bg-gray-500 text-white rounded-lg font-bold hover:bg-gray-600 transition-colors"
+              >
+                Back to Lobby
+              </button>
+            </div>
+          </CardContent>
+        </Card>
+        
+        <div className="text-center text-sm text-gray-500 mt-8">
+          Become a better negotiator with <a href="https://www.transformal.ai" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 underline">www.transformal.ai</a>
+        </div>
+      </div>
+    );
+  }
+
+  return null;
+};
+
+export default WinAsMuchAsYouCanGame;
